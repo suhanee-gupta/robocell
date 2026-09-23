@@ -44,15 +44,17 @@ check(
     "missing zone wait times",
 )
 check(s["zone_wait_time_total_s"] > 0, "no zone contention at all: zones not exercised")
+check(s["faults"] > 0, "no faults injected (config sets faults.probability > 0)")
+check(s["tasks_requeued"] == s["faults"], "every fault must requeue exactly one task")
+check(s["estops"] == 2, f"expected the 2 configured global E-stops, got {s['estops']}")
+check(s["wait_time_p95_s"] >= s["wait_time_mean_s"] >= 0, "wait time stats inconsistent")
 check(all(0.0 < u <= 1.0 for u in s["arm_utilization"].values()), "bad utilisation")
-check(0.0 <= s["wait_time_mean_s"] <= s["wait_time_p95_s"] or s["tasks_completed"] < 20,
-      "wait time stats inconsistent")
 
 if failures:
     for f in failures:
         print("FAIL:", f)
     sys.exit(1)
-print("ok:", json.dumps({k: s[k] for k in ("tasks_completed", "tasks_rejected", "sim_time_s")}))
+print("ok:", json.dumps({k: s[k] for k in ("tasks_completed", "tasks_rejected", "faults", "estops", "sim_time_s")}))
 PY
 done
 

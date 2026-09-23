@@ -1,7 +1,8 @@
 """The factory cell: arms, scheduler and safety monitor wired to one SimClock.
 
 Actor order within every tick (fixed, so runs are deterministic):
-  1. control  - admit arriving tasks, then dispatch queued tasks to idle arms
+  1. control  - scheduled events (E-stop presses/resets, fault injection/recovery), then
+                admit arriving tasks and dispatch queued tasks to idle arms
   2. arms     - each arm advances one tick, in config order
   3. monitor  - checks safety invariants on the resulting state and samples metrics
 """
@@ -9,6 +10,7 @@ Actor order within every tick (fixed, so runs are deterministic):
 from __future__ import annotations
 
 import asyncio
+import functools
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -19,7 +21,7 @@ from robocell.clock import SimClock
 from robocell.config import CellConfig, ConfigError, TaskGenConfig
 from robocell.kinematics import FloatArray, tip_position
 from robocell.metrics import Metrics
-from robocell.scheduler import Scheduler, Task
+from robocell.scheduler import Assignment, Scheduler, Task
 from robocell.zones import ZoneManager
 
 # Floating point slack for the per-tick limit checks (not modelling slack).
@@ -81,6 +83,8 @@ class Cell:
         self.rng = rng if rng is not None else np.random.default_rng(0)
         # Monitor state: last two joint samples and the stop count seen with them.
         self._history: dict[str, list[tuple[FloatArray, int]]] = {a.name: [] for a in self.arms}
+        for at_s in config.estop.global_at_s:
+            self.at(max(1, self.clock.ticks(at_s)), self._global_estop_press)
 
     # ---- arm callbacks ------------------------------------------------------------
 
@@ -95,13 +99,60 @@ class Cell:
     def _on_zone_wait(self, arm: Arm, zone: int) -> None:
         self.metrics.zone_wait(self.zones.zones[zone].name)
 
-    # ---- actors -------------------------------------------------------------------
+    # ---- events -------------------------------------------------------------------
 
     def at(self, tick: int, action: Callable[[], None]) -> None:
         """Run `action` at the start of `tick` (before arrivals and dispatch)."""
         if tick <= self.clock.tick:
             raise ValueError(f"tick {tick} is not in the future")
         self._events.setdefault(tick, []).append(action)
+
+    # ---- E-stop and faults ----------------------------------------------------------
+
+    def estop_all(self) -> None:
+        """Global E-stop: every arm halts before its next tick."""
+        self.metrics.estops += 1
+        for arm in self.arms:
+            arm.estop()
+
+    def reset_all(self) -> None:
+        for arm in self.arms:
+            if arm.state is ArmState.ESTOPPED:
+                arm.reset()
+
+    def _global_estop_press(self) -> None:
+        self.estop_all()
+        self.at(self.clock.tick + self.clock.ticks(self.config.estop.reset_after_s), self.reset_all)
+
+    def _plan_faults(self, assignments: Sequence[Assignment]) -> None:
+        """Decide (seeded) whether each new execution faults, and when."""
+        for a in assignments:
+            # Always draw both numbers so the random stream does not depend on outcomes.
+            roll, when = self.rng.random(), self.rng.random()
+            if roll >= self.config.faults.probability:
+                continue
+            assert a.arm.plan is not None
+            span = max(1, self.clock.ticks(a.arm.plan.segments[0].duration))
+            tick = a.tick + 1 + int(when * span)
+            self.at(tick, functools.partial(self._fault, a.arm, a.task.id))
+
+    def _fault(self, arm: Arm, task_id: int) -> None:
+        if arm.task_id != task_id or arm.state is not ArmState.MOVING:
+            return  # finished, E-stopped or already faulted meanwhile: nothing to break
+        self.metrics.faults += 1
+        arm.inject_fault()  # hands the task back through _on_abort -> requeue
+        self._schedule_recovery(arm, self.clock.ticks(self.config.faults.recovery_s))
+
+    def _schedule_recovery(self, arm: Arm, after: int) -> None:
+        self.at(self.clock.tick + after, functools.partial(self._recover, arm))
+
+    def _recover(self, arm: Arm) -> None:
+        if arm.state is ArmState.FAULT:
+            arm.clear_fault()
+        elif arm.fault_latched:  # E-stopped while faulted: clear once the E-stop is reset
+            self._schedule_recovery(arm, 1)
+
+    # ---- actors -------------------------------------------------------------------
 
     def control_step(self, tick: int) -> None:
         for action in self._events.pop(tick, []):
@@ -111,7 +162,7 @@ class Cell:
         ):
             self.scheduler.submit(self.tasks[self._next_task], tick)
             self._next_task += 1
-        self.scheduler.dispatch(tick)
+        self._plan_faults(self.scheduler.dispatch(tick))
 
     def zone_violations(self) -> int:
         """Safety invariant: each shared zone holds at most one arm, and only its lock holder.
@@ -153,9 +204,10 @@ class Cell:
                     self.metrics.limit_violations += 1
 
     def done(self) -> bool:
+        """All tasks resolved and every arm at rest. Pending events (e.g. a later E-stop
+        press) do not keep the run alive; recoveries do, via the arms' availability."""
         return (
             self._next_task == len(self.tasks)
-            and not self._events
             and self.scheduler.idle
             and all(a.available for a in self.arms)
         )
