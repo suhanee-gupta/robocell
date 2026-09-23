@@ -63,4 +63,15 @@ run 1 > "$OUT/run_1_again.json"
 cmp -s "$OUT/run_1.json" "$OUT/run_1_again.json" || { echo "FAIL: seed 1 output differs between runs"; exit 1; }
 echo "ok: identical output"
 
+echo "== viewer frames (headless, Agg)"
+FRAMES="$OUT/frames"
+run 1 --frames "$FRAMES" --max-frames 12 > "$OUT/run_1_frames.json" 2> "$OUT/frames.log"
+count=$(find "$FRAMES" -name 'frame_*.png' -size +1k | wc -l)
+[ "$count" -eq 12 ] || { echo "FAIL: expected 12 frames, found $count"; cat "$OUT/frames.log"; exit 1; }
+for f in "$FRAMES"/frame_*.png; do
+    [ "$(head -c 4 "$f" | tail -c 3)" = "PNG" ] || { echo "FAIL: $f is not a PNG"; exit 1; }
+done
+cmp -s "$OUT/run_1.json" "$OUT/run_1_frames.json" || { echo "FAIL: recording frames changed the run"; exit 1; }
+echo "ok: $count frames"
+
 echo "verify: all checks passed"

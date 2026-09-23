@@ -1,3 +1,7 @@
+import matplotlib
+
+matplotlib.use("Agg")  # headless: tests must never open a window
+
 import pytest
 from helpers import DEFAULT_CONFIG
 

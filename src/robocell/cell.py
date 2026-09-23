@@ -80,6 +80,8 @@ class Cell:
         self.metrics.generated = len(self.tasks)
         self._next_task = 0
         self._events: dict[int, list[Callable[[], None]]] = {}
+        # Called at the end of every tick with the settled state (e.g. the viewer's recorder).
+        self.observers: list[Callable[[Cell, int], None]] = []
         self.rng = rng if rng is not None else np.random.default_rng(0)
         # Monitor state: last two joint samples and the stop count seen with them.
         self._history: dict[str, list[tuple[FloatArray, int]]] = {a.name: [] for a in self.arms}
@@ -180,6 +182,11 @@ class Cell:
         return violations
 
     def monitor_step(self, tick: int) -> None:
+        self._check(tick)
+        for observer in self.observers:
+            observer(self, tick)
+
+    def _check(self, tick: int) -> None:
         self.metrics.ticks = tick
         self.metrics.zone_violations += self.zone_violations()
         dt = self.clock.dt
@@ -237,10 +244,14 @@ class Cell:
         return asyncio.run(self.run_async(pace))
 
 
-def simulate(config: CellConfig, n_tasks: int, seed: int, pace: float | None = None) -> RunResult:
-    """Generate `n_tasks` from `seed` and run them to completion (fully deterministic)."""
+def build_cell(config: CellConfig, n_tasks: int, seed: int) -> Cell:
+    """A cell with `n_tasks` generated from `seed`; running it is fully deterministic."""
     task_seed, cell_seed = np.random.SeedSequence(seed).spawn(2)
     tasks = generate_tasks(
         config.tasks, n_tasks, np.random.default_rng(task_seed), config.sim.tick_s
     )
-    return Cell(config, tasks, np.random.default_rng(cell_seed)).run(pace)
+    return Cell(config, tasks, np.random.default_rng(cell_seed))
+
+
+def simulate(config: CellConfig, n_tasks: int, seed: int, pace: float | None = None) -> RunResult:
+    return build_cell(config, n_tasks, seed).run(pace)

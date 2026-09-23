@@ -51,3 +51,13 @@ def test_unfinished_run_exits_nonzero(tmp_path: Path, capsys: pytest.CaptureFixt
 
 def test_negative_task_count_rejected(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["run", "--config", DEFAULT, "--tasks", "-1"]) == 2
+
+
+def test_frames_flag_writes_pngs(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    out = tmp_path / "frames"
+    args = ["run", "--config", DEFAULT, "--tasks", "10", "--seed", "2"]
+    assert main([*args, "--frames", str(out), "--max-frames", "4"]) == 0
+    with_frames = json.loads(capsys.readouterr().out)
+    assert len(list(out.glob("frame_*.png"))) == 4
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out) == with_frames
