@@ -33,10 +33,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if args.tasks < 0:
-        print("error: --tasks must be >= 0", file=sys.stderr)
+    problems = [
+        msg
+        for bad, msg in (
+            (args.tasks < 0, "--tasks must be >= 0"),
+            (args.frame_every <= 0, "--frame-every must be > 0"),
+            (args.max_frames < 1, "--max-frames must be >= 1"),
+            (args.speed <= 0, "--speed must be > 0"),
+        )
+        if bad
+    ]
+    if problems:
+        print(f"error: {'; '.join(problems)}", file=sys.stderr)
         return 2
-    cell = build_cell(config, args.tasks, args.seed)
+    try:
+        cell = build_cell(config, args.tasks, args.seed)
+    except ConfigError as exc:  # e.g. a home pose inside a shared zone
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     recorder = None
     if args.viz or args.frames:
         from robocell.viz import Recorder

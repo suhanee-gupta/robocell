@@ -61,3 +61,24 @@ def test_frames_flag_writes_pngs(tmp_path: Path, capsys: pytest.CaptureFixture[s
     assert len(list(out.glob("frame_*.png"))) == 4
     assert main(args) == 0
     assert json.loads(capsys.readouterr().out) == with_frames
+
+
+@pytest.mark.parametrize(
+    "extra", [["--max-frames", "0"], ["--speed", "0"], ["--frame-every", "-1"]]
+)
+def test_bad_viewer_flags_rejected(extra: list[str], capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["run", "--config", DEFAULT, "--tasks", "1", *extra]) == 2
+    assert "error" in capsys.readouterr().err
+
+
+def test_home_in_zone_config_is_a_usage_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Regression (review 2 #4): this used to crash with a traceback and exit code 1."""
+    text = Path(DEFAULT).read_text() + (
+        '\n[[zones]]\nname = "bad"\nmin = [-1.0, -1.0, 0.0]\nmax = [-0.2, -0.2, 1.5]\n'
+    )
+    cfg = tmp_path / "bad.toml"
+    cfg.write_text(text)
+    assert main(["run", "--config", str(cfg), "--tasks", "1"]) == 2
+    assert "home pose is inside" in capsys.readouterr().err

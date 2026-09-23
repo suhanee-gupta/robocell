@@ -118,6 +118,7 @@ class Arm:
             raise ValueError(f"arm {self.name!r}: home pose violates joint limits")
         self.q = self.home.copy()
         self._occupancy_cache: tuple[bytes, frozenset[int]] = (b"", frozenset())
+        self.body_margin = kin.body_gap(self.geom) / 2 + 1e-9
         self.margin = sweep_margin(self.geom, self.max_vel, self.dt / SUBSTEPS)
 
     @property
@@ -142,12 +143,13 @@ class Arm:
         return kin.forward(self.geom, self.q)
 
     def occupied_zones(self, q: FloatArray | None = None) -> set[int]:
-        """Zones any body point is inside at pose q (default: now), exact boxes."""
+        """Zones the arm's links may be inside at pose q (default: now); conservative, see
+        zones.py."""
         pose = self.q if q is None else q
         key = pose.tobytes()
         # Checked every tick by the monitor; arms at rest keep the same pose for long spans.
         if self._occupancy_cache[0] != key:
-            occupied = self.zones.occupied(kin.body_points(self.geom, pose))
+            occupied = self.zones.occupied(kin.body_points(self.geom, pose), self.body_margin)
             self._occupancy_cache = (key, frozenset(occupied))
         return set(self._occupancy_cache[1])
 
@@ -248,9 +250,10 @@ class Arm:
 
     def _abandon_plan(self) -> None:
         """After a fault the task is gone. If the arm stopped outside every zone, drop the
-        motion. If it stopped inside one, keep its locks and shorten the path to the first
-        pose along it that is clear of all zones: once the fault is cleared it moves only
-        that far (never on to the abandoned target, which another arm may now be serving)."""
+        motion. If it stopped inside one, keep the locks that path needs and shorten it to
+        the first pose along it that is clear of all zones: once the fault is cleared it
+        moves only that far. (If the abandoned target is itself inside a zone, that first
+        clear pose lies on the retreat leg, so the arm passes the target, still under lock.)"""
         plan = self.plan
         assert plan is not None
         if not plan.started or not self.occupied_zones():
@@ -261,6 +264,9 @@ class Arm:
         held = self.held_zones
         plan.segments = [self.trajectory_to(b, start=a) for a, b in pairwise(waypoints)]
         plan.touch = [{z: t for z, t in self._sweep(g).items() if z in held} for g in plan.segments]
+        # Locks for the abandoned rest of the path would only block other arms meanwhile.
+        for zone in held - plan.zones - self.occupied_zones():
+            self.zones.release(zone, self.name)
         plan.task_segment = -1
         plan.k = 0
         plan.replan = False  # the new segments already start from rest at the current pose
@@ -270,7 +276,8 @@ class Arm:
         for i, (a, b) in enumerate(pairwise(path)):
             s = np.linspace(0.0, 1.0, CLEAR_SAMPLES + 1)[1:, None]
             qs = a + s * (b - a)
-            clear = ~self.zones.occupied_mask(kin.body_points_batch(self.geom, qs))
+            bodies = kin.body_points_batch(self.geom, qs)
+            clear = ~self.zones.occupied_mask(bodies, self.body_margin)
             if np.any(clear):
                 return [*path[: i + 1], qs[int(np.argmax(clear))]]
         raise RuntimeError(f"{self.name}: planned path never leaves the shared zones")

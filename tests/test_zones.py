@@ -158,6 +158,30 @@ def test_link_through_zone_counts_as_occupied() -> None:
     assert 0 in sweep(arm.geom, seg, zones, arm.margin, DT)
 
 
+def test_rest_pose_with_link_clipping_zone_between_samples_retreats() -> None:
+    """Regression (review 2 #1): a tiny zone on link 2 between two body sample points was
+    not seen at rest, so the arm idled there without the lock."""
+    geom_arm = Arm(arm_cfg("a", (0.0, 0.0), 150.0), DT)
+    q = np.array([0.0, np.radians(45), np.radians(-90)])
+    pts = body_points_batch(geom_arm.geom, q)[0]
+    mid = (pts[-3] + pts[-2]) / 2  # on link 2, halfway between two samples
+    box = ZoneConfig("tiny", tuple(mid - 0.004), tuple(mid + 0.004))  # type: ignore[arg-type]
+    zones = ZoneManager([box])
+    arm = Arm(arm_cfg("a", (0.0, 0.0), 150.0), DT, zones=zones)
+    assert zones.occupied(pts) == set()  # the sample points alone miss it
+    assert arm.occupied_zones(q) == {0}
+    arm.assign(0, tip_position(arm.geom, q))
+    assert arm.plan is not None
+    assert len(arm.plan.segments) == 2  # so the arm retreats instead of resting there
+    for tick in range(1, 3000):
+        arm.step(tick)
+        if arm.available:
+            break
+    assert arm.available
+    assert not arm.occupied_zones()
+    assert no_locks_left(zones)
+
+
 def test_home_inside_zone_rejected() -> None:
     cfg = two_arm_config((ZoneConfig("bad", (-1.0, -1.0, 0.0), (0.0, 1.0, 2.0)),))
     with pytest.raises(ConfigError, match="home pose is inside"):
@@ -282,6 +306,8 @@ def test_fault_inside_zone_clears_out_and_releases() -> None:
         assert not mover.occupied_zones(final)  # ...ends clear of every zone...
         # ...and does not drive on to the abandoned target (regression, review #3).
         assert np.linalg.norm(tip_position(mover.geom, final) - target) > 0.01
+        # Regression (review 2 #3): locks for the abandoned rest of the path are dropped.
+        assert mover.held_zones <= plan.zones | mover.occupied_zones()
 
     cell.at(190, fault_mover)
     cell.at(400, lambda: faulted[0].clear_fault())

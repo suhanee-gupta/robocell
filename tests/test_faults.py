@@ -147,3 +147,20 @@ def test_requeue_wait_is_accumulated() -> None:
     m.task_completed(1, "a", 0.0)
     assert m.wait_ticks == [7]
     assert m.requeued == 1
+
+
+def test_overlapping_global_estops_hold_until_last_reset(default_config: CellConfig) -> None:
+    """Regression (review 2 #2): the first press's reset used to release a later press early."""
+    cfg = dataclasses.replace(
+        default_config,
+        faults=FaultConfig(),
+        estop=EStopConfig(global_at_s=(5.0, 5.5), reset_after_s=1.0),
+    )
+    cell = busy_cell(cfg)
+    held: list[bool] = []
+    cell.at(620, lambda: held.append(all(a.state is ArmState.ESTOPPED for a in cell.arms)))
+    cell.at(660, lambda: held.append(any(a.state is ArmState.ESTOPPED for a in cell.arms)))
+    result = cell.run()
+    assert held == [True, False]  # still stopped at 6.2 s, released after 6.5 s
+    assert result.metrics.estops == 2
+    assert result.finished

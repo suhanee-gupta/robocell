@@ -85,6 +85,7 @@ class Cell:
         self.rng = rng if rng is not None else np.random.default_rng(0)
         # Monitor state: last two joint samples and the stop count seen with them.
         self._history: dict[str, list[tuple[FloatArray, int]]] = {a.name: [] for a in self.arms}
+        self._estop_reset_due = 0
         for at_s in config.estop.global_at_s:
             self.at(max(1, self.clock.ticks(at_s)), self._global_estop_press)
 
@@ -124,7 +125,14 @@ class Cell:
 
     def _global_estop_press(self) -> None:
         self.estop_all()
-        self.at(self.clock.tick + self.clock.ticks(self.config.estop.reset_after_s), self.reset_all)
+        # Overlapping presses: only the reset due after the *latest* press may release arms.
+        due = self.clock.tick + self.clock.ticks(self.config.estop.reset_after_s)
+        self._estop_reset_due = max(self._estop_reset_due, due)
+        self.at(due, self._global_reset_if_due)
+
+    def _global_reset_if_due(self) -> None:
+        if self.clock.tick >= self._estop_reset_due:
+            self.reset_all()
 
     def _plan_faults(self, assignments: Sequence[Assignment]) -> None:
         """Decide (seeded) whether each new execution faults, and when."""

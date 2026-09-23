@@ -13,8 +13,10 @@ Locking protocol (deadlock-free by construction):
 4. A moving arm never waits for a lock (it already holds its whole path), so every holder
    eventually releases unless it is E-stopped, which is an operator decision.
 
-"Occupies" means any of the arm's body sample points (shoulder, points along both links,
-elbow, tip; see kinematics.body_points_batch) lies inside the box.
+"Occupies" means some part of the arm's links may be inside the box: a body sample point
+(shoulder, points along both links, elbow, tip; see kinematics.body_points_batch) lies
+within half the point spacing of it. Every point of a link is that close to a sample, so
+the test is conservative for the continuous links, at rest as well as in motion.
 """
 
 from __future__ import annotations
@@ -117,17 +119,18 @@ class ZoneManager:
             if who in lock.queue:
                 lock.queue.remove(who)
 
-    def occupied_mask(self, bodies: FloatArray) -> NDArray[np.bool_]:
-        """For (N, P, 3) sets of body points: which of the N sets touch any zone (exact)."""
+    def occupied_mask(self, bodies: FloatArray, margin: float = 0.0) -> NDArray[np.bool_]:
+        """For (N, P, 3) sets of body points: which of the N sets touch any zone grown by
+        `margin`."""
         pts = bodies[:, :, None, :]  # (N, P, 1, 3) against (Z, 3) boxes
-        inside = np.all((pts >= self._lo) & (pts <= self._hi), axis=3)  # (N, P, Z)
+        inside = np.all((pts >= self._lo - margin) & (pts <= self._hi + margin), axis=3)
         mask: NDArray[np.bool_] = inside.any(axis=(1, 2))
         return mask
 
-    def occupied(self, points: FloatArray) -> set[int]:
-        """Zones containing any of the given points (exact boxes, no margin)."""
+    def occupied(self, points: FloatArray, margin: float = 0.0) -> set[int]:
+        """Zones containing any of the given points, boxes grown by `margin`."""
         pts = np.atleast_2d(points)[:, None, :]  # (P, 1, 3) against (Z, 3) boxes
-        inside = np.all((pts >= self._lo) & (pts <= self._hi), axis=2)  # (P, Z)
+        inside = np.all((pts >= self._lo - margin) & (pts <= self._hi + margin), axis=2)
         return {int(i) for i in np.flatnonzero(inside.any(axis=0))}
 
 
