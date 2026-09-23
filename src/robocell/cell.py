@@ -16,10 +16,11 @@ import numpy as np
 
 from robocell.arm import Arm, ArmState
 from robocell.clock import SimClock
-from robocell.config import CellConfig, TaskGenConfig
+from robocell.config import CellConfig, ConfigError, TaskGenConfig
 from robocell.kinematics import FloatArray, tip_position
 from robocell.metrics import Metrics
 from robocell.scheduler import Scheduler, Task
+from robocell.zones import ZoneManager
 
 # Floating point slack for the per-tick limit checks (not modelling slack).
 LIMIT_RTOL = 1e-9
@@ -59,16 +60,20 @@ class Cell:
         self.config = config
         self.clock = SimClock(config.sim.tick_s)
         dt = self.clock.dt
-        self.arms = [Arm(cfg, dt) for cfg in config.arms]
+        self.zones = ZoneManager(config.zones)
+        self.arms = [Arm(cfg, dt, zones=self.zones) for cfg in config.arms]
+        for arm in self.arms:
+            if inside := arm.occupied_zones(arm.home):
+                names = [self.zones.zones[z].name for z in sorted(inside)]
+                raise ConfigError(f"arm {arm.name!r}: home pose is inside shared zone(s) {names}")
         self.metrics = Metrics(
-            dt=dt,
-            arm_names=[a.name for a in self.arms],
-            zone_names=[z.name for z in config.zones],
+            dt=dt, arm_names=[a.name for a in self.arms], zone_names=self.zones.names
         )
         self.scheduler = Scheduler(self.arms, self.metrics)
         for arm in self.arms:
             arm.on_done = self._on_done
             arm.on_abort = self._on_abort
+            arm.on_zone_wait = self._on_zone_wait
         self.tasks = sorted(tasks, key=lambda t: (t.arrival_tick, t.id))
         self.metrics.generated = len(self.tasks)
         self._next_task = 0
@@ -86,6 +91,9 @@ class Cell:
 
     def _on_abort(self, arm: Arm, task_id: int) -> None:
         self.scheduler.requeue(task_id, self.clock.tick)
+
+    def _on_zone_wait(self, arm: Arm, zone: int) -> None:
+        self.metrics.zone_wait(self.zones.zones[zone].name)
 
     # ---- actors -------------------------------------------------------------------
 
@@ -105,8 +113,24 @@ class Cell:
             self._next_task += 1
         self.scheduler.dispatch(tick)
 
+    def zone_violations(self) -> int:
+        """Safety invariant: each shared zone holds at most one arm, and only its lock holder.
+        Also flags locks held by arms at rest (a leaked lock would block others forever)."""
+        occupants: dict[int, list[str]] = {}
+        violations = 0
+        for arm in self.arms:
+            for zone in arm.occupied_zones():
+                occupants.setdefault(zone, []).append(arm.name)
+            if arm.available and arm.held_zones:
+                violations += 1
+        for zone, names in occupants.items():
+            if len(names) > 1 or self.zones.holder(zone) != names[0]:
+                violations += 1
+        return violations
+
     def monitor_step(self, tick: int) -> None:
         self.metrics.ticks = tick
+        self.metrics.zone_violations += self.zone_violations()
         dt = self.clock.dt
         for arm in self.arms:
             if arm.state is ArmState.MOVING:

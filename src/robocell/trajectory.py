@@ -69,7 +69,20 @@ class Trajectory:
         return pos, np.outer(sd, d), np.outer(sdd, d)
 
     def position(self, t: float) -> FloatArray:
-        pos: FloatArray = self.sample(np.array([t]))[0][0]
+        """Scalar fast path of sample() (called every tick for every moving arm)."""
+        total, ta, a = self.duration, self.t_acc, self.s_acc
+        if t >= total:
+            return self.goal.copy()
+        if t <= 0.0:
+            return self.start.copy()
+        if t < ta:
+            s = 0.5 * a * t * t
+        elif t > total - ta:
+            rem = total - t
+            s = 1.0 - 0.5 * a * rem * rem
+        else:
+            s = 0.5 * a * ta * ta + self.s_vel * (t - ta)
+        pos: FloatArray = self.start + self.delta * s
         return pos
 
     def velocity(self, t: float) -> FloatArray:

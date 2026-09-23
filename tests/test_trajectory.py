@@ -109,3 +109,13 @@ def test_zero_move() -> None:
 def test_rejects_non_positive_limits() -> None:
     with pytest.raises(ValueError, match="positive"):
         plan(np.zeros(3), np.ones(3), (1, 0, 1), (1, 1, 1))
+
+
+@settings(max_examples=200)
+@given(angles, angles, limits, limits, st.floats(-0.5, 1.5))
+def test_scalar_position_matches_vectorised(
+    start: np.ndarray, goal: np.ndarray, vmax: np.ndarray, amax: np.ndarray, frac: float
+) -> None:
+    tr = plan(start, goal, vmax, amax)
+    t = frac * tr.duration
+    np.testing.assert_array_equal(tr.position(t), tr.positions(np.array([t]))[0])

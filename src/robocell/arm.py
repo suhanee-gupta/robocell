@@ -4,6 +4,11 @@ The arm is driven one tick at a time by `step()`; `run()` wraps that in an async
 that advances on SimClock ticks. Commands (assign, estop, reset, inject_fault,
 clear_fault) take effect immediately on the arm's state, and motion only ever happens
 inside `step()`, so an E-stop issued at any point stops the arm before its next tick.
+
+Zone handling follows the protocol in zones.py: all zones of a command are acquired
+before the first motion tick and released as soon as the remaining path cannot touch them.
+After an abrupt stop the arm keeps the locks for whatever remains of its path; resuming
+only ever re-times the *same* joint-space line, so it never needs a lock it does not hold.
 """
 
 from __future__ import annotations
@@ -19,6 +24,7 @@ from robocell import trajectory as traj
 from robocell.clock import SimClock
 from robocell.config import ArmConfig
 from robocell.kinematics import ArmGeometry, FloatArray
+from robocell.zones import SUBSTEPS, ZoneManager, sweep, sweep_margin
 
 
 class ArmState(Enum):
@@ -49,12 +55,25 @@ class Plan:
     """Remaining motion of one command: straight joint-space segments, executed in order."""
 
     segments: list[traj.Trajectory]
+    # Per segment: zone index -> last time (s) into that segment it may touch the zone.
+    touch: list[dict[int, float]]
     task_id: int | None
     # Index into `segments` whose end completes the task (the arm is then at the target).
     task_segment: int
     k: int = 0  # ticks elapsed in segments[0]
     started: bool = False  # False until motion begins (e.g. while waiting for zones)
     replan: bool = False  # segments[0] must be re-timed from rest before continuing
+
+    @property
+    def zones(self) -> set[int]:
+        return {z for touch in self.touch for z in touch}
+
+    def still_needs(self, zone: int, t: float) -> bool:
+        """Can the path from time t into segments[0] onwards still touch `zone`?"""
+        # t is always a sample instant, so any later contact shows up at a sample >= t.
+        if self.touch[0].get(zone, -1.0) >= t:
+            return True
+        return any(zone in touch for touch in self.touch[1:])
 
 
 @dataclass
@@ -64,7 +83,7 @@ class Transition:
     new: ArmState
 
 
-def _noop(arm: Arm, task_id: int) -> None:
+def _noop(arm: Arm, value: int) -> None:
     pass
 
 
@@ -74,6 +93,8 @@ class Arm:
     dt: float
     on_done: Callable[[Arm, int], None] = _noop
     on_abort: Callable[[Arm, int], None] = _noop
+    on_zone_wait: Callable[[Arm, int], None] = _noop  # called each tick blocked on a zone
+    zones: ZoneManager = field(default_factory=lambda: ZoneManager([]))
     state: ArmState = field(init=False, default=ArmState.IDLE)
     q: FloatArray = field(init=False)
     plan: Plan | None = field(init=False, default=None)
@@ -86,7 +107,10 @@ class Arm:
         self.max_vel = np.array(self.cfg.max_vel)
         self.max_acc = np.array(self.cfg.max_acc)
         self.home = np.array(self.cfg.home)
+        if not self.geom.within_limits(self.home):
+            raise ValueError(f"arm {self.name!r}: home pose violates joint limits")
         self.q = self.home.copy()
+        self.margin = sweep_margin(self.geom, self.max_vel, self.dt / SUBSTEPS)
 
     @property
     def name(self) -> str:
@@ -109,6 +133,15 @@ class Arm:
     def pose(self) -> kin.ArmPose:
         return kin.forward(self.geom, self.q)
 
+    def occupied_zones(self, q: FloatArray | None = None) -> set[int]:
+        """Zones the elbow or tip is inside at pose q (default: now), exact boxes."""
+        pose = kin.forward(self.geom, self.q if q is None else q)
+        return self.zones.occupied(np.vstack([pose.elbow, pose.tip]))
+
+    @property
+    def held_zones(self) -> set[int]:
+        return self.zones.held_by(self.name)
+
     # ---- planning -------------------------------------------------------------------
 
     def solve(self, target: FloatArray | tuple[float, float, float]) -> kin.IKSolution | None:
@@ -126,8 +159,15 @@ class Arm:
         sol = self.solve(target)
         return None if sol is None else self.trajectory_to(sol.q).duration
 
-    def _build_segments(self, goal_q: FloatArray) -> list[traj.Trajectory]:
-        return [self.trajectory_to(goal_q)]
+    def _sweep(self, segment: traj.Trajectory) -> dict[int, float]:
+        return sweep(self.geom, segment, self.zones, self.margin, self.dt)
+
+    def _build_plan(self, task_id: int, goal_q: FloatArray) -> Plan:
+        segments = [self.trajectory_to(goal_q)]
+        # Never come to rest inside a shared zone: that would hold its lock indefinitely.
+        if self.occupied_zones(goal_q):
+            segments.append(self.trajectory_to(self.home, start=goal_q))
+        return Plan(segments, [self._sweep(s) for s in segments], task_id, task_segment=0)
 
     # ---- commands -------------------------------------------------------------------
 
@@ -143,7 +183,7 @@ class Arm:
         sol = self.solve(target)
         if sol is None:
             raise UnreachableTargetError(f"{self.name} cannot reach {tuple(target)}")
-        self.plan = Plan(self._build_segments(sol.q), task_id=task_id, task_segment=0)
+        self.plan = self._build_plan(task_id, sol.q)
         self._transition(ArmState.MOVING)
 
     def estop(self) -> None:
@@ -181,12 +221,23 @@ class Arm:
         self._transition(ArmState.IDLE)
 
     def _on_abrupt_stop(self) -> None:
-        if self.plan is not None and self.plan.started:
+        if self.plan is None:
+            return
+        if self.plan.started:
             self.plan.replan = True
+        else:
+            # Still waiting for zones and outside all of them: give up locks and queue spots
+            # so a stopped arm cannot block others; they are re-acquired on resume.
+            self.zones.release_all(self.name)
 
     def _abandon_plan(self) -> None:
-        """After a fault the task is gone; drop the remaining motion."""
-        self.plan = None
+        """After a fault the task is gone. Drop the remaining motion unless the arm stopped
+        inside a zone; then it keeps its locks and finishes the (already cleared) path to
+        get out once the fault is cleared."""
+        assert self.plan is not None
+        if not self.plan.started or not self.occupied_zones():
+            self.zones.release_all(self.name)
+            self.plan = None
 
     # ---- execution ------------------------------------------------------------------
 
@@ -199,13 +250,28 @@ class Arm:
             self._transition(ArmState.MOVING)
         plan = self.plan
         if not plan.started:
+            blocked = self.zones.acquire_in_order(self.name, plan.zones)
+            if blocked is not None:
+                self.on_zone_wait(self, blocked)
+                return
             plan.started = True
         if plan.replan:
-            seg = plan.segments[0]
-            plan.segments[0] = self.trajectory_to(seg.goal)
-            plan.k = 0
-            plan.replan = False
+            self._replan(plan)
         self._advance(plan)
+
+    def _replan(self, plan: Plan) -> None:
+        """Re-time segments[0] from rest at the current pose after an abrupt stop.
+
+        The arm stopped on the straight joint-space line of segments[0], so the new
+        segment is the rest of that same line: it can only touch zones the original
+        path touched and that are still held.
+        """
+        held = self.held_zones
+        seg = self.trajectory_to(plan.segments[0].goal)
+        plan.segments[0] = seg
+        plan.touch[0] = {z: t for z, t in self._sweep(seg).items() if z in held}
+        plan.k = 0
+        plan.replan = False
 
     def _advance(self, plan: Plan) -> None:
         seg = plan.segments[0]
@@ -213,15 +279,20 @@ class Arm:
         t = plan.k * self.dt
         finished = t >= seg.duration
         self.q = seg.position(t)
+        for zone in self.held_zones:
+            if not plan.still_needs(zone, t):
+                self.zones.release(zone, self.name)
         if not finished:
             return
         if plan.task_id is not None and plan.task_segment == 0:
             task_id, plan.task_id = plan.task_id, None
             self.on_done(self, task_id)
         plan.segments.pop(0)
+        plan.touch.pop(0)
         plan.task_segment -= 1
         plan.k = 0
         if not plan.segments:
+            self.zones.release_all(self.name)
             self.plan = None
             self._transition(ArmState.IDLE)
 

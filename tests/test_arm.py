@@ -199,3 +199,9 @@ def test_arm_actor_runs_on_sim_clock() -> None:
     arm, rec, tick = asyncio.run(main())
     assert rec.done == [("a", 1, tick)]
     np.testing.assert_allclose(tip_position(arm.geom, arm.q), TARGET, atol=1e-9)
+
+
+def test_home_outside_limits_rejected() -> None:
+    bad = ArmConfig(**{**CFG.__dict__, "home": (D(175), D(60), D(-100))})
+    with pytest.raises(ValueError, match="home pose"):
+        Arm(bad, DT)
