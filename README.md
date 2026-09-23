@@ -90,7 +90,8 @@ soon as the remaining path can no longer touch the zone.
 the shoulder, points at most 5 cm apart along both links, the elbow and the tip. Paths are
 sampled every ¼ tick against boxes grown by a proven bound:
 `(L₁+L₂)·Σvmaxᵢ·Δt/2 + point spacing/2`. That makes the sampled check conservative for the
-continuous motion of the whole body.
+continuous motion of the whole body. Rest poses and the monitor use boxes grown by half the
+point spacing, so a link cannot clip a zone between two sample points either.
 
 **E-stop and faults.** An E-stop (per arm or global) freezes the arm before its next tick. It
 needs `reset()`, after which the arm resumes, re-timed from rest along the same joint-space
