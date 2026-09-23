@@ -1,0 +1,43 @@
+[project]
+name = "robocell"
+version = "0.1.0"
+description = "3D multi-arm factory cell simulator"
+readme = "README.md"
+authors = [
+    { name = "suhanee-gupta", email = "suhaneegupta2905@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.3",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.168.1",
+    "mypy>=2.3.1",
+    "pytest>=9.1.1",
+    "ruff>=0.16.8",
+]
+
+[project.scripts]
+robocell = "robocell.cli:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "N", "PT", "C4"]
+
+[tool.mypy]
+strict = true
+python_version = "3.12"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
