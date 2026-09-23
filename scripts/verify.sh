@@ -38,6 +38,12 @@ check(s["tasks_completed"] > 0, "no task completed")
 check(s["limit_violations"] == 0, f"joint limit violations: {s['limit_violations']}")
 check(s["max_target_error_m"] < 1e-6, f"target error {s['max_target_error_m']}")
 check(set(s["arm_utilization"]) == {"a", "b", "c", "d"}, "missing arm utilisation")
+check(s["zone_violations"] == 0, f"zone invariant violations: {s['zone_violations']}")
+check(
+    set(s["zone_wait_time_s"]) == {"center", "east", "north", "south", "west"},
+    "missing zone wait times",
+)
+check(s["zone_wait_time_total_s"] > 0, "no zone contention at all: zones not exercised")
 check(all(0.0 < u <= 1.0 for u in s["arm_utilization"].values()), "bad utilisation")
 check(0.0 <= s["wait_time_mean_s"] <= s["wait_time_p95_s"] or s["tasks_completed"] < 20,
       "wait time stats inconsistent")
