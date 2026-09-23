@@ -93,6 +93,10 @@ class Arm:
         return self.cfg.name
 
     @property
+    def actor_name(self) -> str:
+        return f"arm:{self.name}"
+
+    @property
     def available(self) -> bool:
         """Free to take a new task."""
         return self.state is ArmState.IDLE and self.plan is None
@@ -224,5 +228,5 @@ class Arm:
     async def run(self, clock: SimClock) -> None:
         """Actor loop: one step per clock tick, forever (cancelled by the owner)."""
         while True:
-            tick = await clock.wait_tick(self.name)
+            tick = await clock.wait_tick(self.actor_name)
             self.step(tick)

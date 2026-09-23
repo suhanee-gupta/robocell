@@ -188,7 +188,7 @@ def test_arm_actor_runs_on_sim_clock() -> None:
     async def main() -> tuple[Arm, Recorder, int]:
         clock = SimClock(DT)
         arm, rec = make_arm()
-        clock.register(arm.name)
+        clock.register(arm.actor_name)
         arm.assign(1, TARGET)
         async with asyncio.TaskGroup() as tg:
             task = tg.create_task(arm.run(clock))
