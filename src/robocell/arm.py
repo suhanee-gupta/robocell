@@ -16,6 +16,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import pairwise
 
 import numpy as np
 
@@ -38,8 +39,13 @@ ALLOWED_TRANSITIONS: dict[ArmState, frozenset[ArmState]] = {
     ArmState.IDLE: frozenset({ArmState.MOVING, ArmState.FAULT, ArmState.ESTOPPED}),
     ArmState.MOVING: frozenset({ArmState.IDLE, ArmState.FAULT, ArmState.ESTOPPED}),
     ArmState.FAULT: frozenset({ArmState.IDLE, ArmState.ESTOPPED}),
-    ArmState.ESTOPPED: frozenset({ArmState.IDLE}),
+    # Reset returns to FAULT if the arm was faulted before the E-stop: only clear_fault clears it.
+    ArmState.ESTOPPED: frozenset({ArmState.IDLE, ArmState.FAULT}),
 }
+
+
+# Samples per segment when searching a path for the first pose clear of all zones.
+CLEAR_SAMPLES = 400
 
 
 class InvalidTransitionError(RuntimeError):
@@ -101,6 +107,7 @@ class Arm:
     tick: int = field(init=False, default=0)
     transitions: list[Transition] = field(init=False, default_factory=list)
     stop_count: int = field(init=False, default=0)  # E-stops + faults (abrupt stops) so far
+    fault_latched: bool = field(init=False, default=False)  # set by a fault until clear_fault
 
     def __post_init__(self) -> None:
         self.geom = ArmGeometry.from_config(self.cfg)
@@ -134,9 +141,8 @@ class Arm:
         return kin.forward(self.geom, self.q)
 
     def occupied_zones(self, q: FloatArray | None = None) -> set[int]:
-        """Zones the elbow or tip is inside at pose q (default: now), exact boxes."""
-        pose = kin.forward(self.geom, self.q if q is None else q)
-        return self.zones.occupied(np.vstack([pose.elbow, pose.tip]))
+        """Zones any body point is inside at pose q (default: now), exact boxes."""
+        return self.zones.occupied(kin.body_points(self.geom, self.q if q is None else q))
 
     @property
     def held_zones(self) -> set[int]:
@@ -195,16 +201,18 @@ class Arm:
         self._on_abrupt_stop()
 
     def reset(self) -> None:
-        """Clear an E-stop. A command in progress resumes (re-timed from rest) next tick."""
+        """Clear an E-stop. A command in progress resumes (re-timed from rest) next tick.
+        A fault that was active before the E-stop is still active afterwards."""
         if self.state is not ArmState.ESTOPPED:
             raise InvalidTransitionError(f"{self.name}: reset while {self.state.value}")
-        self._transition(ArmState.IDLE)
+        self._transition(ArmState.FAULT if self.fault_latched else ArmState.IDLE)
 
     def inject_fault(self) -> None:
         """Simulate a drive fault: stop now and hand the current task back via on_abort."""
         if self.state not in (ArmState.IDLE, ArmState.MOVING):
             raise InvalidTransitionError(f"{self.name}: fault while {self.state.value}")
         self._transition(ArmState.FAULT)
+        self.fault_latched = True
         self.stop_count += 1
         self._on_abrupt_stop()
         if self.plan is None:
@@ -218,6 +226,7 @@ class Arm:
     def clear_fault(self) -> None:
         if self.state is not ArmState.FAULT:
             raise InvalidTransitionError(f"{self.name}: clear_fault while {self.state.value}")
+        self.fault_latched = False
         self._transition(ArmState.IDLE)
 
     def _on_abrupt_stop(self) -> None:
@@ -231,13 +240,33 @@ class Arm:
             self.zones.release_all(self.name)
 
     def _abandon_plan(self) -> None:
-        """After a fault the task is gone. Drop the remaining motion unless the arm stopped
-        inside a zone; then it keeps its locks and finishes the (already cleared) path to
-        get out once the fault is cleared."""
-        assert self.plan is not None
-        if not self.plan.started or not self.occupied_zones():
+        """After a fault the task is gone. If the arm stopped outside every zone, drop the
+        motion. If it stopped inside one, keep its locks and shorten the path to the first
+        pose along it that is clear of all zones: once the fault is cleared it moves only
+        that far (never on to the abandoned target, which another arm may now be serving)."""
+        plan = self.plan
+        assert plan is not None
+        if not plan.started or not self.occupied_zones():
             self.zones.release_all(self.name)
             self.plan = None
+            return
+        waypoints = self._clearing_waypoints([self.q, *(seg.goal for seg in plan.segments)])
+        held = self.held_zones
+        plan.segments = [self.trajectory_to(b, start=a) for a, b in pairwise(waypoints)]
+        plan.touch = [{z: t for z, t in self._sweep(g).items() if z in held} for g in plan.segments]
+        plan.task_segment = -1
+        plan.k = 0
+        plan.replan = False  # the new segments already start from rest at the current pose
+
+    def _clearing_waypoints(self, path: list[FloatArray]) -> list[FloatArray]:
+        """Truncate a joint-space polyline at its first pose clear of every zone."""
+        for i, (a, b) in enumerate(pairwise(path)):
+            s = np.linspace(0.0, 1.0, CLEAR_SAMPLES + 1)[1:, None]
+            qs = a + s * (b - a)
+            clear = ~self.zones.occupied_mask(kin.body_points_batch(self.geom, qs))
+            if np.any(clear):
+                return [*path[: i + 1], qs[int(np.argmax(clear))]]
+        raise RuntimeError(f"{self.name}: planned path never leaves the shared zones")
 
     # ---- execution ------------------------------------------------------------------
 

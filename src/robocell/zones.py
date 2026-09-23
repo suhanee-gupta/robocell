@@ -13,8 +13,8 @@ Locking protocol (deadlock-free by construction):
 4. A moving arm never waits for a lock (it already holds its whole path), so every holder
    eventually releases unless it is E-stopped, which is an operator decision.
 
-"Occupies" means the elbow or the tip point lies inside the box (see docs for the
-limitations of that point model).
+"Occupies" means any of the arm's body sample points (shoulder, points along both links,
+elbow, tip; see kinematics.body_points_batch) lies inside the box.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from robocell.config import ZoneConfig
-from robocell.kinematics import ArmGeometry, FloatArray, forward_batch
+from robocell.kinematics import ArmGeometry, FloatArray, body_gap, body_points_batch
 from robocell.trajectory import Trajectory
 
 # Path samples per sim tick when sweeping a trajectory for zone contact.
@@ -117,6 +117,13 @@ class ZoneManager:
             if who in lock.queue:
                 lock.queue.remove(who)
 
+    def occupied_mask(self, bodies: FloatArray) -> NDArray[np.bool_]:
+        """For (N, P, 3) sets of body points: which of the N sets touch any zone (exact)."""
+        pts = bodies[:, :, None, :]  # (N, P, 1, 3) against (Z, 3) boxes
+        inside = np.all((pts >= self._lo) & (pts <= self._hi), axis=3)  # (N, P, Z)
+        mask: NDArray[np.bool_] = inside.any(axis=(1, 2))
+        return mask
+
     def occupied(self, points: FloatArray) -> set[int]:
         """Zones containing any of the given points (exact boxes, no margin)."""
         pts = np.atleast_2d(points)[:, None, :]  # (P, 1, 3) against (Z, 3) boxes
@@ -125,14 +132,15 @@ class ZoneManager:
 
 
 def sweep_margin(geom: ArmGeometry, max_vel: FloatArray, sample_dt: float) -> float:
-    """How far the elbow or tip can move between a path sample and the nearest one.
+    """Box growth that makes sampled zone checks conservative for the continuous arm body.
 
-    Each joint rotates the point about an axis at most l1 + l2 away, so
+    Time: each joint rotates a body point about an axis at most l1 + l2 away, so
     |dp| <= (l1 + l2) * sum_i |dq_i| <= (l1 + l2) * sum_i vmax_i * dt, and any instant is
-    within sample_dt / 2 of a sample. Growing zones by this margin makes sampled checks
-    conservative: no contact between samples can be missed.
+    within sample_dt / 2 of a sample.
+    Space: any point of a link is within body_gap / 2 of a body sample point.
     """
-    return (geom.l1 + geom.l2) * float(np.sum(max_vel)) * sample_dt / 2 + 1e-9
+    time_part = (geom.l1 + geom.l2) * float(np.sum(max_vel)) * sample_dt / 2
+    return time_part + body_gap(geom) / 2 + 1e-9
 
 
 def sweep(
@@ -145,17 +153,18 @@ def sweep(
     """Zones the segment may touch -> last sampled time (s) it may touch each.
 
     Samples every dt / SUBSTEPS (which includes every tick instant k * dt, where the
-    arm is actually evaluated) plus the end point, and tests elbow and tip against the
+    arm is actually evaluated) plus the end point, and tests the body points against the
     zones grown by `margin`.
     """
     if not len(zones):
         return {}
     n = int(np.ceil(segment.duration * SUBSTEPS / dt))
     times = np.minimum((np.arange(n + 1) / SUBSTEPS) * dt, segment.duration)
-    elbows, tips = forward_batch(geom, segment.positions(times))
+    body = body_points_batch(geom, segment.positions(times))  # (N, P, 3)
+    flat = body.reshape(-1, 3)
     touch: dict[int, float] = {}
     for i, zone in enumerate(zones.zones):
-        hit = zone.contains(elbows, margin) | zone.contains(tips, margin)
+        hit = zone.contains(flat, margin).reshape(body.shape[:2]).any(axis=1)
         if np.any(hit):
             touch[i] = float(times[np.flatnonzero(hit)[-1]])
     return touch

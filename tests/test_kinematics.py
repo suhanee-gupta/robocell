@@ -221,3 +221,24 @@ def test_yaw_at_atan2_branch_cut() -> None:
         sol = solve(geom, p, yaw_hint=hint)
         assert abs(sol.q[0]) == pytest.approx(math.pi)
         np.testing.assert_allclose(tip_position(geom, sol.q), p, atol=1e-9)
+
+
+def test_base_axis_reachable_when_yaw_limits_exclude_zero() -> None:
+    """Regression (review #4): with no hint the default yaw 0 was outside [0.5, 1.0] rad,
+    so a point straight above the shoulder was wrongly reported unreachable."""
+    geom = ArmGeometry((0.0, 0.0), 0.4, 0.6, 0.5, (0.5, D(-20), D(-150)), (1.0, D(110), D(150)))
+    p = (0.0, 0.0, 1.2)
+    sol = solve(geom, p)
+    assert sol.q[0] == pytest.approx(0.5)
+    np.testing.assert_allclose(tip_position(geom, sol.q), p, atol=1e-9)
+    assert solve(geom, p, yaw_hint=0.7).q[0] == pytest.approx(0.7)
+
+
+def test_body_points_cover_both_links() -> None:
+    from robocell.kinematics import LINK_SPACING, body_points
+
+    pts = body_points(ARM, (0.0, 0.0, 0.0))  # straight along +x at shoulder height
+    np.testing.assert_allclose(pts[0], ARM.shoulder)
+    np.testing.assert_allclose(pts[-1], tip_position(ARM, (0.0, 0.0, 0.0)))
+    gaps = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+    assert np.all(gaps <= LINK_SPACING + 1e-12)

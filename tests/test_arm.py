@@ -134,11 +134,25 @@ def test_fault_hands_task_back_and_stops() -> None:
     assert_transitions_valid(arm)
 
 
-def test_estop_while_faulted_then_reset() -> None:
+def test_estop_reset_does_not_clear_a_fault() -> None:
+    """Regression (review #2): E-stop + reset used to silently clear an active fault."""
     arm, _ = make_arm()
     arm.inject_fault()
     arm.estop()
     assert arm.state is ArmState.ESTOPPED
+    arm.reset()
+    assert arm.state is ArmState.FAULT
+    assert not arm.available
+    arm.clear_fault()
+    assert arm.available
+    assert_transitions_valid(arm)
+
+
+def test_estop_reset_without_fault_goes_idle() -> None:
+    arm, _ = make_arm()
+    arm.inject_fault()
+    arm.clear_fault()
+    arm.estop()
     arm.reset()
     assert arm.available
     assert_transitions_valid(arm)

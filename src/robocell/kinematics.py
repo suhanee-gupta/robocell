@@ -29,6 +29,8 @@ REACH_EPS = 1e-9
 LIMIT_EPS = 1e-9
 # Below this radial distance the target is on the base axis and yaw is undetermined.
 AXIS_EPS = 1e-9
+# Maximum spacing (m) of the sample points along each link used for zone occupancy.
+LINK_SPACING = 0.05
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,39 @@ def forward_batch(geom: ArmGeometry, qs: FloatArray) -> tuple[FloatArray, FloatA
     return elbows, tips
 
 
+def _link_fractions(length: float) -> FloatArray:
+    n = max(1, math.ceil(length / LINK_SPACING))
+    return np.arange(1, n + 1) / n
+
+
+def body_gap(geom: ArmGeometry) -> float:
+    """Largest distance between neighbouring body sample points along a link."""
+    return max(geom.l1 / len(_link_fractions(geom.l1)), geom.l2 / len(_link_fractions(geom.l2)))
+
+
+def body_points_batch(geom: ArmGeometry, qs: FloatArray) -> FloatArray:
+    """Sample points on the arm's body for (N, 3) configurations -> (N, P, 3).
+
+    Shoulder, then points along link 1 ending at the elbow, then along link 2 ending at
+    the tip, spaced at most LINK_SPACING apart. A zone is "occupied" by an arm when any of
+    these points is inside it, so a link passing through a zone is caught, not only the
+    elbow and tip.
+    """
+    elbows, tips = forward_batch(geom, np.atleast_2d(qs))
+    shoulder = geom.shoulder
+    f1 = _link_fractions(geom.l1)[None, :, None]
+    f2 = _link_fractions(geom.l2)[None, :, None]
+    link1 = shoulder + f1 * (elbows - shoulder)[:, None, :]
+    link2 = elbows[:, None, :] + f2 * (tips - elbows)[:, None, :]
+    shoulders = np.broadcast_to(shoulder, (len(elbows), 1, 3))
+    return np.concatenate([shoulders, link1, link2], axis=1)
+
+
+def body_points(geom: ArmGeometry, q: FloatArray | tuple[float, float, float]) -> FloatArray:
+    pts: FloatArray = body_points_batch(geom, np.asarray(q, dtype=np.float64))[0]
+    return pts
+
+
 def tip_position(geom: ArmGeometry, q: FloatArray | tuple[float, float, float]) -> FloatArray:
     return forward(geom, q).tip
 
@@ -180,8 +215,13 @@ def inverse(
     planar_back = _planar(geom, -r, dz)
     assert planar_back is not None  # same distance, so equally reachable
 
-    # On the base axis every yaw reaches the point, so keep the current one.
-    yaw = yaw_hint if r < AXIS_EPS else math.atan2(dy, dx)
+    if r < AXIS_EPS:
+        # On the base axis every yaw reaches the point: keep the current one if it is legal,
+        # else the nearest legal yaw (the hint may be outside limits, e.g. the default 0).
+        lo, hi = geom.joint_min[0], geom.joint_max[0]
+        yaw = yaw_hint if _representations(yaw_hint, lo, hi) else min(max(yaw_hint, lo), hi)
+    else:
+        yaw = math.atan2(dy, dx)
 
     for yaw_raw, planar in ((yaw, planar_front), (yaw + math.pi, planar_back)):
         yaws = _representations(yaw_raw, geom.joint_min[0], geom.joint_max[0])

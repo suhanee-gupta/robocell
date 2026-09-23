@@ -18,7 +18,7 @@ from robocell.config import (
     TaskGenConfig,
     ZoneConfig,
 )
-from robocell.kinematics import ArmGeometry, forward_batch
+from robocell.kinematics import ArmGeometry, body_points_batch, tip_position
 from robocell.scheduler import Task
 from robocell.trajectory import plan
 from robocell.zones import SUBSTEPS, Zone, ZoneManager, sweep, sweep_margin
@@ -117,7 +117,8 @@ AMAX = np.array([4.0, 3.0, 5.0])
 def test_sweep_never_misses_contact(
     q0: np.ndarray, q1: np.ndarray, corner: np.ndarray, size: np.ndarray
 ) -> None:
-    """Compare against a 64x finer exact sampling: every contact is found, and the
+    """Compare against 64x finer time sampling of densely sampled links: every contact is
+    found (including a link passing through with elbow and tip outside), and the
     reported last-contact time is never earlier than a real contact (minus half a sample)."""
     corner = corner + np.array([0.0, 0.0, 0.4])
     zones = zm(("z", tuple(corner), tuple(corner + size)))  # type: ignore[arg-type]
@@ -125,8 +126,11 @@ def test_sweep_never_misses_contact(
     spacing = DT / SUBSTEPS
     touch = sweep(GEOM, seg, zones, sweep_margin(GEOM, VMAX, spacing), DT)
     fine = np.linspace(0.0, seg.duration, max(2, int(seg.duration / spacing) * 64 + 1))
-    elbows, tips = forward_batch(GEOM, seg.positions(fine))
-    hit = zones.zones[0].contains(elbows) | zones.zones[0].contains(tips)
+    body = body_points_batch(GEOM, seg.positions(fine))
+    # Dense points along the links (4x the body sampling) approximate the continuous arm.
+    a, b = body[:, :-1, :], body[:, 1:, :]
+    dense = np.concatenate([a + f * (b - a) for f in np.linspace(0, 1, 5)], axis=1)
+    hit = zones.zones[0].contains(dense.reshape(-1, 3)).reshape(dense.shape[:2]).any(axis=1)
     if np.any(hit):
         assert 0 in touch
         assert fine[np.flatnonzero(hit)[-1]] <= touch[0] + spacing / 2 + 1e-12
@@ -138,6 +142,20 @@ def test_sweep_catches_fast_crossing_of_thin_zone() -> None:
     zones = zm(("slab", (1.0, -0.0005, 0.3), (1.2, 0.0005, 0.5)))
     touch = sweep(GEOM, seg, zones, sweep_margin(GEOM, VMAX, DT / SUBSTEPS), DT)
     assert 0 in touch
+
+
+def test_link_through_zone_counts_as_occupied() -> None:
+    """Regression (review #5): only elbow and tip were checked, so a link could pass
+    through a zone unnoticed."""
+    zones = zm(("small", (0.2, -0.05, 0.35), (0.3, 0.05, 0.45)))
+    arm = Arm(arm_cfg("a", (0.0, 0.0), 150.0), DT, zones=zones)
+    q = np.array([0.0, 0.0, 0.0])  # link 1 runs straight through the box along +x
+    pose_pts = np.vstack([tip_position(arm.geom, q), [0.6, 0.0, 0.4]])
+    assert not zones.occupied(pose_pts)  # neither elbow nor tip is inside
+    assert arm.occupied_zones(q) == {0}
+    # And a sweep through that pose reports the zone.
+    seg = plan(np.array([-0.5, 0.0, 0.0]), np.array([0.5, 0.0, 0.0]), VMAX, AMAX)
+    assert 0 in sweep(arm.geom, seg, zones, arm.margin, DT)
 
 
 def test_home_inside_zone_rejected() -> None:
@@ -254,9 +272,16 @@ def test_fault_inside_zone_clears_out_and_releases() -> None:
         mover = next(arm for arm in cell.arms if arm.plan is not None and arm.plan.started)
         assert mover.occupied_zones()
         faulted.append(mover)
+        target = np.array(cell.scheduler.tasks[mover.task_id].target)  # type: ignore[index]
         mover.inject_fault()
-        assert mover.plan is not None  # keeps the cleared path to get out later
+        plan = mover.plan
+        assert plan is not None  # keeps a path to get out later...
         assert mover.held_zones
+        assert plan.zones <= mover.held_zones  # ...that needs no new locks...
+        final = plan.segments[-1].goal
+        assert not mover.occupied_zones(final)  # ...ends clear of every zone...
+        # ...and does not drive on to the abandoned target (regression, review #3).
+        assert np.linalg.norm(tip_position(mover.geom, final) - target) > 0.01
 
     cell.at(190, fault_mover)
     cell.at(400, lambda: faulted[0].clear_fault())
