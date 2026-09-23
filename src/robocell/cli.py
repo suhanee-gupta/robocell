@@ -7,6 +7,7 @@ import json
 import sys
 from collections.abc import Sequence
 
+from robocell.cell import simulate
 from robocell.config import ConfigError, load_config
 
 
@@ -27,11 +28,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    summary = {
-        "seed": args.seed,
-        "tasks_generated": args.tasks,
-        "arms": [a.name for a in config.arms],
-        "zones": [z.name for z in config.zones],
-    }
+    if args.tasks < 0:
+        print("error: --tasks must be >= 0", file=sys.stderr)
+        return 2
+    result = simulate(config, args.tasks, args.seed)
+    summary = {"seed": args.seed, "finished": result.finished, **result.metrics.summary()}
     print(json.dumps(summary, indent=2, sort_keys=True))
-    return 0
+    return 0 if result.finished else 1

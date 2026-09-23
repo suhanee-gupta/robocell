@@ -29,12 +29,24 @@ def check(cond: bool, msg: str) -> None:
 
 check(s["seed"] == seed, f"seed mismatch: {s['seed']}")
 check(s["tasks_generated"] == tasks, f"generated {s['tasks_generated']} != {tasks}")
+check(s["finished"] is True, "run did not finish (deadlock or timeout)")
+check(
+    s["tasks_completed"] + s["tasks_rejected"] == s["tasks_generated"],
+    f"completed {s['tasks_completed']} + rejected {s['tasks_rejected']} != generated",
+)
+check(s["tasks_completed"] > 0, "no task completed")
+check(s["limit_violations"] == 0, f"joint limit violations: {s['limit_violations']}")
+check(s["max_target_error_m"] < 1e-6, f"target error {s['max_target_error_m']}")
+check(set(s["arm_utilization"]) == {"a", "b", "c", "d"}, "missing arm utilisation")
+check(all(0.0 < u <= 1.0 for u in s["arm_utilization"].values()), "bad utilisation")
+check(0.0 <= s["wait_time_mean_s"] <= s["wait_time_p95_s"] or s["tasks_completed"] < 20,
+      "wait time stats inconsistent")
 
 if failures:
     for f in failures:
         print("FAIL:", f)
     sys.exit(1)
-print("ok:", json.dumps({k: s[k] for k in ("tasks_generated",)}))
+print("ok:", json.dumps({k: s[k] for k in ("tasks_completed", "tasks_rejected", "sim_time_s")}))
 PY
 done
 
