@@ -16,6 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from enum import Enum
+from functools import cached_property
 
 import numpy as np
 from numpy.typing import NDArray
@@ -53,9 +54,14 @@ class ArmGeometry:
             joint_max=cfg.joint_max,
         )
 
-    @property
+    @cached_property
     def shoulder(self) -> FloatArray:
         return np.array([self.base[0], self.base[1], self.base_height])
+
+    @cached_property
+    def link_fractions(self) -> tuple[FloatArray, FloatArray]:
+        """Positions of the body sample points along link 1 and link 2, as fractions."""
+        return _link_fractions(self.l1), _link_fractions(self.l2)
 
     @property
     def reach(self) -> float:
@@ -115,7 +121,8 @@ def _link_fractions(length: float) -> FloatArray:
 
 def body_gap(geom: ArmGeometry) -> float:
     """Largest distance between neighbouring body sample points along a link."""
-    return max(geom.l1 / len(_link_fractions(geom.l1)), geom.l2 / len(_link_fractions(geom.l2)))
+    f1, f2 = geom.link_fractions
+    return max(geom.l1 / len(f1), geom.l2 / len(f2))
 
 
 def body_points_batch(geom: ArmGeometry, qs: FloatArray) -> FloatArray:
@@ -128,12 +135,13 @@ def body_points_batch(geom: ArmGeometry, qs: FloatArray) -> FloatArray:
     """
     elbows, tips = forward_batch(geom, np.atleast_2d(qs))
     shoulder = geom.shoulder
-    f1 = _link_fractions(geom.l1)[None, :, None]
-    f2 = _link_fractions(geom.l2)[None, :, None]
-    link1 = shoulder + f1 * (elbows - shoulder)[:, None, :]
-    link2 = elbows[:, None, :] + f2 * (tips - elbows)[:, None, :]
-    shoulders = np.broadcast_to(shoulder, (len(elbows), 1, 3))
-    return np.concatenate([shoulders, link1, link2], axis=1)
+    f1, f2 = geom.link_fractions
+    n1 = len(f1)
+    out = np.empty((len(elbows), 1 + n1 + len(f2), 3))
+    out[:, 0, :] = shoulder
+    out[:, 1 : 1 + n1, :] = shoulder + f1[None, :, None] * (elbows - shoulder)[:, None, :]
+    out[:, 1 + n1 :, :] = elbows[:, None, :] + f2[None, :, None] * (tips - elbows)[:, None, :]
+    return out
 
 
 def body_points(geom: ArmGeometry, q: FloatArray | tuple[float, float, float]) -> FloatArray:

@@ -117,6 +117,7 @@ class Arm:
         if not self.geom.within_limits(self.home):
             raise ValueError(f"arm {self.name!r}: home pose violates joint limits")
         self.q = self.home.copy()
+        self._occupancy_cache: tuple[bytes, frozenset[int]] = (b"", frozenset())
         self.margin = sweep_margin(self.geom, self.max_vel, self.dt / SUBSTEPS)
 
     @property
@@ -142,7 +143,13 @@ class Arm:
 
     def occupied_zones(self, q: FloatArray | None = None) -> set[int]:
         """Zones any body point is inside at pose q (default: now), exact boxes."""
-        return self.zones.occupied(kin.body_points(self.geom, self.q if q is None else q))
+        pose = self.q if q is None else q
+        key = pose.tobytes()
+        # Checked every tick by the monitor; arms at rest keep the same pose for long spans.
+        if self._occupancy_cache[0] != key:
+            occupied = self.zones.occupied(kin.body_points(self.geom, pose))
+            self._occupancy_cache = (key, frozenset(occupied))
+        return set(self._occupancy_cache[1])
 
     @property
     def held_zones(self) -> set[int]:
