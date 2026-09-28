@@ -104,5 +104,3 @@ inside a zone holds its lock, and that no idle arm holds a lock. It also checks 
 and per-tick velocity and acceleration (except across deliberate emergency stops). The
 counters appear in the JSON output, and `verify.sh` requires them to be zero.
 
-More detail, including an interview-style walkthrough, is in `docs/WALKTHROUGH.md`. Review
-findings and their fixes are in `docs/REVIEW.md`.
