@@ -1,6 +1,8 @@
 # dotfiles and dot-folders (.venv, .claude, caches, ...)
 .*
-!.gitignore
+.gitignore
+
+docs/
 
 # python
 __pycache__/
@@ -17,4 +19,5 @@ out/
 output/
 *.png
 *.gif
+
 *.mp4
